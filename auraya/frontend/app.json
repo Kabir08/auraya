@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "Auraya",
+    "slug": "auraya",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0a0a0a"
+    },
+    "android": {
+      "package": "com.auraya.app",
+      "versionCode": 1,
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_IMAGES",
+        "WRITE_EXTERNAL_STORAGE"
+      ],
+      "config": {
+        "googleMaps": {}
+      }
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-camera",       { "cameraPermission": "Auraya needs camera access to try on jewelry." }],
+      ["expo-image-picker", { "photosPermission": "Auraya needs photo access so you can upload jewelry images." }],
+      ["expo-media-library", { "photosPermission": "Auraya needs photo access to save your try-on snapshots." }]
+    ],
+    "scheme": "auraya",
+    "extra": {
+      "eas": { "projectId": "replace-with-your-eas-project-id" }
+    }
+  }
+}

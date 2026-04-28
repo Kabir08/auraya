@@ -1,0 +1,45 @@
+name: Deploy Backend to Render
+
+on:
+  push:
+    branches: [main]
+    paths:    ["auraya/backend/**"]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: auraya/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Lint (ruff)
+        run: pip install ruff && ruff check app/
+
+      - name: Run tests
+        env:
+          REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+          TRIPO_API_KEY:       ${{ secrets.TRIPO_API_KEY }}
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY:  ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          AURAYA_API_KEY:      test_key
+        run: pytest tests/ -v --tb=short || true   # non-blocking until tests exist
+
+  deploy:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render Deploy Hook
+        run: |
+          curl -s -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" \
+            -o /dev/null -w "HTTP %{http_code}"

@@ -1,0 +1,101 @@
+name: Build APK + Firebase Test Lab
+
+on:
+  push:
+    branches: [main]
+    paths:    ["auraya/frontend/**"]
+  workflow_dispatch:      # allow manual trigger for QA agent
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: auraya/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: auraya/frontend/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Setup EAS
+        run: npm install -g eas-cli
+
+      - name: Build APK (Expo Application Services)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
+            --output ./auraya-preview.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auraya-apk
+          path: auraya/frontend/auraya-preview.apk
+          retention-days: 7
+
+  firebase-test-lab:
+    needs: build-apk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: auraya-apk
+          path: ./apk
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run Robo Test on Firebase Test Lab
+        id: robo-test
+        run: |
+          gcloud firebase test android run \
+            --type robo \
+            --app ./apk/auraya-preview.apk \
+            --device model=Pixel6,version=33,locale=en,orientation=portrait \
+            --device model=SamsungS21,version=31,locale=en,orientation=portrait \
+            --timeout 5m \
+            --results-bucket gs://${{ secrets.FIREBASE_RESULTS_BUCKET }} \
+            --results-dir "run-${{ github.run_id }}" \
+            --robo-directives "text:jewelry_search=necklace gold" \
+            2>&1 | tee firebase_output.txt
+
+      - name: Upload Firebase results
+        uses: actions/upload-artifact@v4
+        with:
+          name: firebase-test-results
+          path: firebase_output.txt
+
+      - name: Trigger QA Agent analysis
+        if: always()
+        env:
+          QA_WEBHOOK_URL: ${{ secrets.QA_AGENT_WEBHOOK_URL }}
+          RUN_ID:         ${{ github.run_id }}
+          FIREBASE_BUCKET: ${{ secrets.FIREBASE_RESULTS_BUCKET }}
+        run: |
+          curl -s -X POST "$QA_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"run_id\": \"$RUN_ID\",
+              \"firebase_bucket\": \"$FIREBASE_BUCKET\",
+              \"results_dir\": \"run-$RUN_ID\",
+              \"commit_sha\": \"${{ github.sha }}\"
+            }"
