@@ -5,12 +5,15 @@
 ## Overview
 
 The backend is a **Python FastAPI** service responsible for:
-1. Receiving images from the mobile app
+1. Receiving images from the web frontend (file upload or webcam snapshot)
 2. Running SAM segmentation (or RMBG fallback)
 3. Classifying jewelry type
 4. Calling Meshy.ai for 3D generation
-5. Serving `.glb` assets back to the app
+5. Serving `.glb` assets back to the browser
 6. Pushing progress via WebSocket
+7. **Serving the static web frontend** (`frontend/` directory mounted at `/`)
+
+**Deployment:** Hugging Face Spaces — Docker container. HF Spaces exposes port 7860.
 
 ---
 
@@ -27,8 +30,8 @@ The backend is a **Python FastAPI** service responsible for:
 | 3D generation | Meshy.ai REST API | v1 |
 | 3D fallback | `tsr` (TripoSR) | self-hosted |
 | Mesh optimization | `gltfpack` (CLI) | - |
-| Task queue | `celery` + Redis | async jobs |
-| File storage | Local disk (Phase 1) / S3 (Phase 2) | - |
+| Task queue | **Background tasks** (`fastapi.BackgroundTasks`) | Replaces Celery+Redis — simpler for HF Spaces |
+| File storage | `/tmp` (ephemeral on HF Spaces) | Assets cleaned up after 1h |
 | Rate limiting | `slowapi` | - |
 | Auth | API key header (`X-Auraya-Key`) | Phase 1 simple |
 
@@ -164,7 +167,7 @@ LIMITS = {
 
 - Max image upload: **10 MB**
 - Max concurrent Meshy.ai jobs per user: **2**
-- Generated asset TTL: **24 hours** (cleaned by cron)
+- Generated asset TTL: **1 hour** (FastAPI BackgroundTask scheduled cleanup — HF Spaces `/tmp` is ephemeral anyway)
 - SAM timeout → fallback to RMBG after **3 seconds**
 - Meshy.ai timeout → fallback to TripoSR after **45 seconds**
 
@@ -191,11 +194,8 @@ SAM_CHECKPOINT_PATH=./models/sam2_hiera_large.pt
 SAM_MODEL_TYPE=vit_h
 
 # Storage
-ASSET_DIR=./assets
-ASSET_BASE_URL=http://localhost:8000/assets
-
-# Redis (for Celery)
-REDIS_URL=redis://localhost:6379/0
+ASSET_DIR=/tmp/auraya_assets
+ASSET_BASE_URL=https://<your-hf-space>.hf.space/assets
 
 # Security
 AURAYA_API_KEY=change_me_in_production
@@ -204,12 +204,76 @@ MAX_UPLOAD_MB=10
 
 ---
 
-## Hardware Requirements (Dev)
+## Hardware Requirements (Dev & HF Spaces)
 
-| Mode | Minimum | Recommended |
-|:-----|:--------|:------------|
-| SAM 2 inference | 8GB RAM, CPU | 16GB RAM + GPU (CUDA) |
-| TripoSR fallback | 12GB GPU VRAM | RTX 3080+ |
-| Without GPU | Use RMBG-1.4 + Meshy.ai only | - |
+| Mode | Minimum | Notes |
+|:-----|:--------|:------|
+| HF Spaces CPU tier | 2 vCPU, 16GB RAM | Use RMBG-1.4 + Meshy.ai only (no SAM GPU needed) |
+| HF Spaces GPU tier | T4 (16GB) | Enables SAM 2 inference |
+| TripoSR fallback | 12GB GPU VRAM | Only if Meshy.ai is unavailable |
+| Local dev (no GPU) | 8GB RAM, CPU | `rembg` fallback only |
 
-> For development without a GPU, disable SAM and use `rembg` (RMBG-1.4) which runs on CPU at ~1-2s/image.
+> For HF Spaces free tier (CPU), disable SAM 2 and use `rembg` (RMBG-1.4) at ~1-2s/image. Meshy.ai handles all 3D generation — no local GPU needed for that.
+
+---
+
+## HF Spaces Deployment
+
+### Dockerfile
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps for OpenCV + rembg
+RUN apt-get update && apt-get install -y libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ ./backend/
+COPY frontend/ ./frontend/
+
+# HF Spaces requires port 7860
+ENV PORT=7860
+EXPOSE 7860
+
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+```
+
+### `main.py` — Mount frontend as static files
+
+```python
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+app = FastAPI()
+
+# API routes registered first
+app.include_router(segmentation_router, prefix="/api/v1")
+app.include_router(mesh_router,         prefix="/api/v1")
+
+# Frontend SPA served at root — must be last
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+```
+
+### HF Spaces `README.md` header (Space config)
+
+```yaml
+---
+title: Auraya
+emoji: 💎
+colorFrom: purple
+colorTo: pink
+sdk: docker
+pinned: false
+---
+```
+
+### Environment Secrets (set in HF Space settings, not in code)
+
+```
+MESHY_API_KEY       ← required
+AURAYA_API_KEY      ← optional, for rate-limit bypass
+```

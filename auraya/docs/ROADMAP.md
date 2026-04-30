@@ -1,83 +1,77 @@
 # Auraya — Development Roadmap
 
+> **Deployment target:** Hugging Face Spaces (Docker). Validate the full loop in browser before building the Android app.
+> **Scope:** Jewelry only for now (necklace, ring, bracelet, earring). Generic object AR requires physics + object-type-aware placement — deferred.
+
 ---
 
-## Phase 1 — Foundation (Weeks 1–3)
-**Goal:** Backend pipeline working end-to-end, flat PNG overlay on AR (no 3D yet).
+## Phase 1 — HF Spaces Web App: Core Loop (Weeks 1–3)
+**Goal:** Working end-to-end in a browser. User uploads a jewelry photo → 3D model → AR overlay on webcam.
 
-### Backend
+### Backend (FastAPI — Docker on HF Spaces)
 - [ ] FastAPI scaffold with health check endpoint
+- [ ] `Dockerfile` for HF Spaces (CPU-only, port 7860)
 - [ ] Image upload endpoint with validation (size, MIME, blur)
-- [ ] Jewelry classifier (MobileNetV3, fine-tuned on jewelry dataset)
-- [ ] `rembg` (RMBG-1.4) integration for background removal (CPU-only, no GPU needed)
-- [ ] Basic asset serving endpoint
-
-### Frontend
-- [ ] React Native project init (TypeScript, New Architecture)
-- [ ] Camera capture screen (`react-native-vision-camera`)
-- [ ] Gallery upload screen (`react-native-image-picker`)
-- [ ] API service layer (axios)
-- [ ] Processing screen (simple progress indicator)
-- [ ] Flat PNG try-on: overlay transparent jewelry PNG on live camera feed (no 3D)
-
-### Milestone
-> User can photograph a necklace, backend removes background, app overlays flat PNG on camera feed. Not 3D yet, but proves the core loop.
-
----
-
-## Phase 2 — 3D Generation (Weeks 4–5)
-**Goal:** Replace flat PNG overlay with a real 3D `.glb` model.
-
-### Backend
-- [ ] Meshy.ai API integration (`/api/v1/generate-3d`)
-- [ ] Celery + Redis task queue for async 3D generation
+- [ ] `rembg` (RMBG-1.4) integration for background removal — no GPU needed
+- [ ] Jewelry classifier guard (MobileNetV3 — rejects non-jewelry before heavy compute)
+- [ ] Meshy.ai Image-to-3D API integration (`/api/v1/generate-3d`)
 - [ ] WebSocket progress endpoint (`/ws/{task_id}`)
-- [ ] TripoSR self-hosted fallback (if GPU available)
-- [ ] `gltfpack` Draco compression on generated `.glb`
-- [ ] Asset TTL cleanup (cron job, 24h)
+- [ ] Static file serving for the HTML/JS frontend (`/` → `frontend/index.html`)
+- [ ] Asset TTL cleanup (in-memory or tmp dir, 1h)
 
-### Frontend
-- [ ] Processing screen: WebSocket-driven live progress bar
-- [ ] `.glb` download and local file cache (`react-native-fs`)
-- [ ] ViroReact integration: load `.glb` in AR scene
-- [ ] Basic placement: model at fixed center of screen
+### Frontend (HTML + Vanilla JS — no build step)
+- [ ] `index.html` single-page layout: Upload panel + Webcam panel + AR viewer
+- [ ] File upload (`<input type="file">`) → POST to `/api/v1/segment`
+- [ ] Webcam capture via `getUserMedia` → snapshot → POST to `/api/v1/segment`
+- [ ] Processing state: WebSocket-driven live progress bar
+- [ ] Three.js `GLTFLoader` — load returned `.glb` and render in a canvas overlay
+- [ ] MediaPipe Pose (JS SDK via CDN) — detect shoulder landmarks from webcam feed
+- [ ] `computeNeckAnchor()` — midpoint of landmarks #11 and #12
+- [ ] Canvas compositor — blend Three.js render on top of `<video>` element each frame
+- [ ] Manual scale / rotate sliders as fallback when MediaPipe can't find landmarks
 
 ### Milestone
-> User photographs jewelry → 3D model generated in ~20s → model renders in AR.
+> User opens the HF Space URL in a laptop browser, uploads a necklace photo, sees the 3D model overlaid on their webcam feed. No install required.
 
 ---
 
-## Phase 3 — Smart Tracking (Weeks 6–7)
-**Goal:** Model automatically anchors to the user's neck/chest.
+## Phase 2 — Quality & UX Polish (Weeks 4–5)
+**Goal:** Smooth experience, better tracking, shareable results.
 
-### Frontend
-- [ ] MediaPipe Holistic integration (`react-native-mediapipe`)
-- [ ] `computeNeckAnchor()` and `computeScaleFactor()` functions
-- [ ] ViroReact scene: anchor `Viro3DObject` to `neckAnchor` coordinates
-- [ ] Dynamic scale: shoulder-width-based scaling
-- [ ] Lighting estimation: ViroReact ambient + spot lights matching scene brightness
-- [ ] ARCore Depth API: occlusion (chin-over-necklace handling)
-
-### UX Polish
-- [ ] "Move closer / farther" proximity guide
-- [ ] "Better lighting" detection
-- [ ] Scale ↕ and rotation ↔ manual adjustment sliders in AR view
+- [ ] SAM 2 integration for segmentation (replaces rembg as primary, better masks)
+- [ ] TripoSR self-hosted fallback (if HF Spaces GPU tier is available)
+- [ ] Draco-compressed `.glb` via `gltfpack` (faster download)
+- [ ] "Move closer / farther" proximity guide (shoulder-width heuristic)
+- [ ] Lighting estimation — adjust Three.js ambient light to match webcam brightness
+- [ ] Save try-on screenshot (canvas `toBlob` → download)
+- [ ] Jewelry type badge on result (necklace / ring / bracelet / earring)
+- [ ] Mobile browser support — test on Chrome Android / Safari iOS (camera via same `getUserMedia`)
 
 ### Milestone
-> Model sticks to neck as user moves, turns head, and adjusts distance. Chin occludes necklace realistically.
+> The HF Space works reliably. Users can screenshot their try-on and share the link.
 
 ---
 
-## Phase 4 — UX & Features (Week 8)
-**Goal:** App feels polished and is demo-ready for jewelry stores.
+## Phase 3 — Android App (After Phase 2 is validated)
+**Goal:** Native Android app that reuses the same FastAPI backend.
 
-- [ ] Save try-on screenshot to gallery
-- [ ] Share button (WhatsApp, Instagram)
-- [ ] Try-on history (local SQLite via `react-native-sqlite-storage`)
-- [ ] Dark/light mode
-- [ ] Onboarding walkthrough (3 screens)
-- [ ] Jewelry type badges on results (necklace / ring / bracelet / earring)
-- [ ] Multiple items: try on up to 3 items simultaneously
+> **Start this phase only once the HF Spaces web version is working end-to-end.**
+
+- [ ] React Native project init (TypeScript, New Architecture)
+- [ ] Same FastAPI backend (no changes needed — just point the app at the HF Spaces URL or a separate deployment)
+- [ ] Camera via `react-native-vision-camera`
+- [ ] MediaPipe Pose on-device (native, faster than JS)
+- [ ] Three.js / ViroReact for AR rendering
+- [ ] Device testing via BrowserStack
+- [ ] Play Store alpha release
+
+---
+
+## Future / Deferred
+- **Generic object AR** (not just jewelry): Needs object-type classification to know *where* to place the model (neck vs. wrist vs. finger vs. table), plus physics for realistic drape/swing. Deferred until jewelry loop is solid.
+- **Physics simulation**: Necklace swing via Cannon-es — deferred to after Phase 2.
+- **iOS app**: After Android is stable.
+- **Automation / CI testing**: Deferred — not needed for HF Spaces launch.
 - [ ] Store catalog mode: browse predefined jewelry SKUs (JSON catalog)
 
 ---

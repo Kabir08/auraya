@@ -1,202 +1,262 @@
-# Auraya — React Native Frontend Specification
+# Auraya — Web Frontend Specification (HF Spaces)
 
 ---
 
 ## Overview
 
-The frontend is a **React Native (TypeScript)** app that handles:
-1. Camera capture and gallery upload
-2. Sending images to the backend
-3. Showing real-time processing progress (WebSocket)
-4. Downloading and caching `.glb` assets
-5. Running MediaPipe on-device for pose tracking
-6. Rendering the 3D jewelry model in AR via ViroReact
+The frontend is a **static HTML + Vanilla JS** single-page app served directly by FastAPI.  
+No build step, no Node.js — just files FastAPI mounts as `StaticFiles` at `/`.
+
+The user can:
+1. Upload a jewelry photo from disk, **or** take a snapshot from their laptop webcam
+2. Watch live progress while the backend segments + generates the 3D model
+3. See the `.glb` model overlaid on their live webcam feed via Three.js + MediaPipe
 
 ---
 
 ## Tech Stack
 
-| Component | Library | Notes |
-|:----------|:--------|:------|
-| Framework | React Native 0.74+ (TypeScript) | New Architecture (Fabric) enabled |
-| Navigation | React Navigation v7 | Stack + Bottom Tabs |
-| Camera | `react-native-vision-camera` v4 | Frame processors for MediaPipe |
-| Gallery | `react-native-image-picker` | Photo/video library access |
-| AR Rendering | `@viro-community/react-viro` | ARCore wrapper |
-| Pose Tracking | `react-native-mediapipe` | On-device, GPU-accelerated |
-| State | `zustand` | Lightweight, no boilerplate |
-| API client | `axios` + `socket.io-client` | REST + WebSocket |
-| Caching | `react-native-fs` | Local `.glb` asset cache |
-| UI Components | `react-native-paper` | Material Design 3 |
-| Animations | `react-native-reanimated` v3 | Loading states, transitions |
+| Component | Library / Approach | Notes |
+|:----------|:------------------|:------|
+| Layout | Plain HTML5 + CSS | No framework needed |
+| Webcam access | `navigator.mediaDevices.getUserMedia` | Standard WebRTC |
+| Pose tracking | MediaPipe Pose JS SDK (CDN) | In-browser WASM, no server call |
+| 3D rendering | Three.js (CDN) + `GLTFLoader` | `.glb` overlay on video canvas |
+| AR compositing | HTML5 Canvas 2D API | Draw video frame then Three.js render |
+| API calls | `fetch()` (native) | No axios needed |
+| WebSocket | Native `WebSocket` API | Progress updates from backend |
+| State | Plain JS module (no Zustand) | Simple enough without a framework |
 
 ---
 
-## Screen Map
+## Page Layout
 
 ```
-App
-├── SplashScreen           → brand logo, init check
-├── HomeScreen             → mode selector (Camera / Gallery / Store Browse)
-├── CameraScreen           → live camera with capture button
-├── GalleryScreen          → system photo picker
-├── ProcessingScreen       → upload progress + 3D gen progress (WebSocket)
-├── ARScreen               → full-screen AR try-on view
-└── SavedScreen            → saved try-on snapshots
+┌──────────────────────────────────────────────────────────┐
+│  ✨ Auraya  —  "Wear it before you buy it"               │
+├───────────────────────────┬──────────────────────────────┤
+│  STEP 1: Jewelry Photo    │  STEP 2: Try It On           │
+│                           │                              │
+│  [📁 Upload Image]        │  [▶ Start Webcam]            │
+│  [📷 Use Webcam Snapshot] │                              │
+│                           │  ┌────────────────────────┐ │
+│  Preview:                 │  │  <video> + canvas AR   │ │
+│  [img preview]            │  │   overlay (Three.js)   │ │
+│                           │  └────────────────────────┘ │
+│  [▶ Process Jewelry]      │                              │
+│                           │  [📸 Save Screenshot]        │
+├───────────────────────────┴──────────────────────────────┤
+│  Progress:  [████████░░░░] 75%  ↻ Generating 3D model…  │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Screen Specifications
+## File Structure
 
-### HomeScreen
 ```
-┌──────────────────────────┐
-│  ✨ Auraya               │
-│  "Wear it before you buy"│
-│                          │
-│  [📷 Use Camera]         │
-│  [🖼 Upload from Gallery]│
-│  [🛍 Browse Store Items] │  ← Phase 2 (partner jewelry catalog)
-│                          │
-│  [Recent Try-Ons ▼]      │
-└──────────────────────────┘
+frontend/
+├── index.html          ← single page, all UI
+├── js/
+│   ├── main.js         ← wires everything together, handles UI state
+│   ├── camera.js       ← getUserMedia, snapshot capture
+│   ├── mediapipe.js    ← loads MediaPipe Pose, exposes computeNeckAnchor()
+│   ├── ar_renderer.js  ← Three.js scene, GLTFLoader, per-frame compositing
+│   └── api.js          ← fetch() wrappers for /api/v1/segment, /generate-3d, /ws
+└── css/
+    └── style.css
 ```
-
-### CameraScreen
-- Full-screen camera preview via `VisionCamera`
-- Bottom: large circular capture button
-- Top-left: flash toggle, flip camera
-- Instruction overlay: "Point at jewelry item and tap"
-- Min recommended resolution: 1080×1080
-
-### ProcessingScreen
-```
-┌──────────────────────────┐
-│  Processing your jewelry │
-│                          │
-│  ✓ Image uploaded        │
-│  ✓ Jewelry detected      │  ← classifier result shown
-│  ↻ Generating 3D model   │  ← WebSocket live progress
-│    [████████░░░] 75%     │
-│                          │
-│  Estimated: ~8 seconds   │
-└──────────────────────────┘
-```
-
-### ARScreen
-- Full-screen camera via ViroReact `ViroARSceneNavigator`
-- Overlay UI (top): jewelry name + confidence badge
-- Bottom toolbar: `[📸 Capture]` `[↔ Scale]` `[🔄 Rotate]` `[💾 Save]`
-- Edge case overlays:
-  - "Move closer" / "Move back" (shoulder distance check)
-  - "Better lighting needed"
-  - "Point camera at yourself"
 
 ---
 
-## State Management (Zustand)
+## Camera Module (`js/camera.js`)
 
-```typescript
-// store/useARStore.ts
-interface AurayanStore {
-  // Processing state
-  uploadedImageUri: string | null;
-  segmentedPngUrl: string | null;
-  glbFileUri: string | null;
-  processingStatus: 'idle' | 'uploading' | 'segmenting' | 'generating' | 'ready' | 'error';
-  processingProgress: number;   // 0-100
+```javascript
+// camera.js
+let stream = null;
 
-  // AR state
-  neckAnchor: { x: number; y: number; z: number } | null;
-  scaleFactor: number;
-  rotationY: number;
-  physicsEnabled: boolean;
+export async function startWebcam(videoEl) {
+  stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+  videoEl.srcObject = stream;
+  await videoEl.play();
+}
 
-  // Actions
-  setImage: (uri: string) => void;
-  setGlbUri: (uri: string) => void;
-  setNeckAnchor: (coords: Coords) => void;
-  resetSession: () => void;
+export function stopWebcam() {
+  stream?.getTracks().forEach(t => t.stop());
+  stream = null;
+}
+
+/** Capture current video frame as a JPEG Blob */
+export function captureSnapshot(videoEl) {
+  const canvas = document.createElement('canvas');
+  canvas.width  = videoEl.videoWidth;
+  canvas.height = videoEl.videoHeight;
+  canvas.getContext('2d').drawImage(videoEl, 0, 0);
+  return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
 }
 ```
 
 ---
 
-## MediaPipe Integration
+## MediaPipe Module (`js/mediapipe.js`)
 
-```typescript
-// services/mediapipe.ts
-import { PoseLandmarker } from 'react-native-mediapipe';
+```javascript
+// mediapipe.js — loads MediaPipe Pose via CDN
+// CDN: https://cdn.jsdelivr.net/npm/@mediapipe/pose
 
-export function computeNeckAnchor(landmarks: PoseLandmark[]): Coords3D {
-  const leftShoulder  = landmarks[11];   // MediaPipe index
-  const rightShoulder = landmarks[12];
+let poseLandmarker = null;
 
-  const midX = (leftShoulder.x + rightShoulder.x) / 2;
-  const midY = (leftShoulder.y + rightShoulder.y) / 2;
-  const midZ = (leftShoulder.z + rightShoulder.z) / 2;
-
-  const shoulderHeight = Math.abs(leftShoulder.y - rightShoulder.y);
-  const neckOffset     = shoulderHeight * 0.20;  // shift upward
-
-  return { x: midX, y: midY - neckOffset, z: midZ };
+export async function initMediaPipe() {
+  const { PoseLandmarker, FilesetResolver } = await import(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.js'
+  );
+  const vision = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
+  );
+  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task' },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+  });
 }
 
-export function computeScaleFactor(landmarks: PoseLandmark[]): number {
-  const shoulderWidthPx = euclidean2D(landmarks[11], landmarks[12]);
-  const REFERENCE_PX    = 250;  // calibrated for average adult at ~60cm
-  return shoulderWidthPx / REFERENCE_PX;
+/** Returns { x, y } in 0–1 normalised coords, or null if no person detected */
+export function computeNeckAnchor(videoEl, timestampMs) {
+  if (!poseLandmarker) return null;
+  const result = poseLandmarker.detectForVideo(videoEl, timestampMs);
+  if (!result.landmarks?.length) return null;
+
+  const lm = result.landmarks[0];
+  const ls = lm[11];  // Left Shoulder
+  const rs = lm[12];  // Right Shoulder
+
+  const midX = (ls.x + rs.x) / 2;
+  const midY = (ls.y + rs.y) / 2;
+  const shoulderSpanY = Math.abs(ls.y - rs.y);
+  return {
+    x: midX,
+    y: midY - shoulderSpanY * 0.20,   // offset upward to neck base
+    shoulderWidthNorm: Math.abs(ls.x - rs.x),
+  };
 }
 ```
 
 ---
 
-## API Service Layer
+## AR Renderer (`js/ar_renderer.js`)
 
-```typescript
-// services/api.ts
-const BASE_URL = process.env.BACKEND_URL ?? 'http://10.0.2.2:8000';  // Android emulator localhost
+```javascript
+// ar_renderer.js — Three.js overlay on webcam canvas
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.165/build/three.module.js';
+import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.165/examples/jsm/loaders/GLTFLoader.js';
 
-export const AurayaAPI = {
-  async segmentImage(imageUri: string): Promise<SegmentResponse> {
-    const form = new FormData();
-    form.append('file', { uri: imageUri, type: 'image/jpeg', name: 'jewelry.jpg' });
-    const res = await axios.post(`${BASE_URL}/api/v1/segment`, form, {
-      headers: { 'Content-Type': 'multipart/form-data', 'X-Auraya-Key': API_KEY },
-      timeout: 30000,
-    });
-    return res.data;
-  },
+let renderer, scene, camera, model;
 
-  async generate3D(pngUrl: string, jewelryType: string): Promise<MeshResponse> {
-    const res = await axios.post(`${BASE_URL}/api/v1/generate-3d`, {
-      png_url: pngUrl, jewelry_type: jewelryType, quality: 'medium',
-    });
-    return res.data;
-  },
+export function initRenderer(canvas) {
+  renderer = new THREE.WebGLRenderer({ canvas, alpha: true });
+  renderer.setSize(canvas.width, canvas.height);
+  renderer.setClearColor(0x000000, 0);  // transparent background
 
-  connectProgressSocket(taskId: string, onProgress: (p: ProgressEvent) => void) {
-    const ws = new WebSocket(`${BASE_URL.replace('http', 'ws')}/ws/${taskId}`);
-    ws.onmessage = (e) => onProgress(JSON.parse(e.data));
-    return ws;
-  },
-};
+  scene  = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(45, canvas.width / canvas.height, 0.01, 100);
+  camera.position.z = 1;
+
+  scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+}
+
+export async function loadModel(glbUrl) {
+  if (model) scene.remove(model);
+  const gltf = await new GLTFLoader().loadAsync(glbUrl);
+  model = gltf.scene;
+  scene.add(model);
+}
+
+/**
+ * Called each animation frame.
+ * anchor: { x, y, shoulderWidthNorm } in 0–1 coords from MediaPipe
+ */
+export function renderFrame(videoEl, canvas, anchor) {
+  // Draw webcam frame underneath
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+  if (model && anchor) {
+    // Map normalised coords to Three.js NDC (-1 to 1)
+    model.position.x = (anchor.x - 0.5) * 2;
+    model.position.y = -(anchor.y - 0.5) * 2;
+
+    const scaleFactor = anchor.shoulderWidthNorm / 0.35;  // 0.35 ≈ avg normalised shoulder width
+    model.scale.setScalar(scaleFactor * 0.25);
+  }
+
+  renderer.render(scene, camera);
+}
 ```
 
 ---
 
-## Android Permissions (AndroidManifest.xml)
+## API Module (`js/api.js`)
 
-```xml
-<uses-permission android:name="android.permission.CAMERA" />
-<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-<uses-permission android:name="android.permission.INTERNET" />
+```javascript
+// api.js
+const BASE = '';  // same origin — FastAPI serves frontend and API
 
-<!-- ARCore -->
-<uses-feature android:name="android.hardware.camera.ar" android:required="true" />
-<meta-data android:name="com.google.ar.core" android:value="required" />
+export async function segmentJewelry(imageBlob) {
+  const form = new FormData();
+  form.append('file', imageBlob, 'jewelry.jpg');
+  const res = await fetch('/api/v1/segment', { method: 'POST', body: form });
+  if (!res.ok) throw await res.json();
+  return res.json();   // { task_id, png_url, jewelry_type }
+}
+
+export async function generate3D(pngUrl, jewelryType) {
+  const res = await fetch('/api/v1/generate-3d', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ png_url: pngUrl, jewelry_type: jewelryType, quality: 'medium' }),
+  });
+  if (!res.ok) throw await res.json();
+  return res.json();   // { task_id }
+}
+
+export function connectProgress(taskId, onProgress) {
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${wsProto}://${location.host}/ws/${taskId}`);
+  ws.onmessage = e => onProgress(JSON.parse(e.data));
+  return ws;
+}
 ```
+
+---
+
+## State Flow
+
+```
+idle
+  │  user picks file OR takes webcam snapshot
+  ▼
+uploading    → POST /api/v1/segment
+  │
+  ▼
+segmenting   → response with png_url
+  │
+  ▼
+generating   → POST /api/v1/generate-3d → WebSocket progress 0→100%
+  │
+  ▼
+ready        → loadModel(glb_url) → start renderFrame() loop
+  │
+  ▼
+[AR view active — MediaPipe tracking + Three.js overlay running at ~30fps]
+```
+
+---
+
+## Android (Future — Phase 3)
+
+> Do not build the Android app until the HF Spaces web version is working end-to-end.
+> When ready: React Native app pointing at the same FastAPI backend. Use BrowserStack for device testing across Android versions.
+
 
 **Runtime permission requests:** camera + media library on first launch with clear explanation dialog.
 
